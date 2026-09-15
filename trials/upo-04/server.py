@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import uvicorn
 from mcp import ClientSession, StdioServerParameters
@@ -56,6 +57,26 @@ STATIC_TAGS = [
     ("hatsune_miku", "twintails", "solo"),
     ("hatsune_miku", "red_eyes", "portrait"),
 ]
+
+
+def _extract_upstream_payload(tool_result: Any) -> tuple[dict[str, Any], str]:
+    """Mirror the already-attested Trial 01D search_posts extraction boundary."""
+    structured = getattr(tool_result, "structuredContent", None)
+    if isinstance(structured, dict) and isinstance(structured.get("posts"), list):
+        return structured, "structuredContent"
+
+    for block in getattr(tool_result, "content", []) or []:
+        text = getattr(block, "text", None)
+        if not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("posts"), list):
+            return parsed, "text_content_json"
+
+    raise RuntimeError("search_posts returned no directly consumable payload containing posts[]")
 
 
 def _static_recommendation(page: int, liked_tags: list[str], limit: int) -> RecommendationResult:
@@ -122,17 +143,20 @@ async def _live_recommendation(page: int, liked_tags: list[str], limit: int) -> 
                 text = "\n".join(getattr(block, "text", "") for block in result.content or [])
                 raise RuntimeError(f"upstream search_posts failed: {text}")
 
-            payload = getattr(result, "structuredContent", None)
-            if not isinstance(payload, dict) or not isinstance(payload.get("posts"), list):
-                raise RuntimeError("upstream search_posts returned no structuredContent.posts[]")
-
+            payload, _payload_source = _extract_upstream_payload(result)
             candidates = from_booru_pictag_search_posts(payload)
+            if not candidates:
+                raise RuntimeError("adapter produced zero candidates from non-empty upstream posts[]")
+
             req = RecommendationRequest(
                 liked_tags=query_tags,
                 limit=min(limit, len(candidates)),
                 diversity_lambda=0.75,
             )
-            return recommend(candidates, req, assembly_mode="live_mcp")
+            rec = recommend(candidates, req, assembly_mode="live_mcp")
+            if not rec.items:
+                raise RuntimeError("recommender produced zero items from valid live candidates")
+            return rec
 
 
 async def _build_gallery(
