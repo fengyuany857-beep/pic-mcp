@@ -1,0 +1,128 @@
+name: Trial 04 - MCP Apps Gallery E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'trials/upo-04/**'
+      - '.github/workflows/trial-04-mcp-apps-gallery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gallery-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout PicMCP
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Booru organ
+        uses: actions/checkout@v4
+        with:
+          repository: echo-xianyu/Booru-Pictag-Get-MCP
+          ref: ed234568fc376517d0abc5a377d65af37981b059
+          path: trials/upo-04/upstream
+
+      - name: Checkout official MCP Apps reference host
+        uses: actions/checkout@v4
+        with:
+          repository: modelcontextprotocol/ext-apps
+          ref: v2.0.0
+          path: trials/upo-04/ext-apps
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Python runtime and reused organs
+        working-directory: trials/upo-04
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'mcp==1.30.0' 'pydantic>=2.11,<3' 'numpy>=2,<3' 'scikit-learn>=1.7,<2' 'httpx[http2]>=0.27,<1' 'playwright==1.57.0'
+          python -m pip install './upstream[http2]'
+          python -m playwright install --with-deps chromium
+
+      - name: Capture provenance and verify old trials untouched
+        working-directory: trials/upo-04
+        run: |
+          mkdir -p artifacts/trial04
+          python --version | tee artifacts/trial04/python-version.txt
+          node --version | tee artifacts/trial04/node-version.txt
+          python -m pip freeze > artifacts/trial04/pip-freeze.txt
+          git -C upstream rev-parse HEAD > artifacts/trial04/upstream-commit.txt
+          git -C ext-apps rev-parse HEAD > artifacts/trial04/ext-apps-commit.txt
+          sha256sum ../upo-01d/src/upo_recommender/models.py ../upo-01d/src/upo_recommender/adapters.py ../upo-01d/src/upo_recommender/recommend.py > artifacts/trial04/recommender-core-sha256.txt
+          git -C ../.. diff --exit-code -- trials/upo-01d trials/upo-02 trials/upo-03
+
+      - name: Run MCP contract, fallback, live binding and direct image fetch
+        working-directory: trials/upo-04
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python scripts/run_contract_trial.py
+
+      - name: Install official basic-host dependencies
+        working-directory: trials/upo-04/ext-apps/examples/basic-host
+        run: npm install --workspaces=false
+
+      - name: Build official basic-host
+        working-directory: trials/upo-04/ext-apps/examples/basic-host
+        run: npm run build
+
+      - name: Start Trial 04 HTTP server and official basic-host
+        working-directory: trials/upo-04
+        run: |
+          python server.py > artifacts/trial04/server-http.log 2>&1 &
+          echo $! > artifacts/trial04/server.pid
+          for i in $(seq 1 40); do
+            if python - <<'PY'
+          import socket
+          s = socket.socket()
+          s.settimeout(0.5)
+          try:
+              s.connect(('127.0.0.1', 3001))
+          except OSError:
+              raise SystemExit(1)
+          finally:
+              s.close()
+          PY
+            then break; fi
+            sleep 0.5
+          done
+          cd ext-apps/examples/basic-host
+          SERVERS='["http://127.0.0.1:3001/mcp"]' npx --yes tsx@4.20.6 serve.ts > ../../../artifacts/trial04/basic-host.log 2>&1 &
+          echo $! > ../../../artifacts/trial04/basic-host.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/ >/dev/null; then break; fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:8080/ >/dev/null
+
+      - name: Run official reference-host browser trial
+        working-directory: trials/upo-04
+        run: python scripts/run_reference_host.py
+
+      - name: Stop trial processes
+        if: always()
+        working-directory: trials/upo-04
+        run: |
+          if [ -f artifacts/trial04/basic-host.pid ]; then kill $(cat artifacts/trial04/basic-host.pid) || true; fi
+          if [ -f artifacts/trial04/server.pid ]; then kill $(cat artifacts/trial04/server.pid) || true; fi
+
+      - name: Upload Trial 04 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trial-04-mcp-apps-gallery-evidence-${{ github.run_number }}
+          path: trials/upo-04/artifacts/trial04/
+          if-no-files-found: warn
+          retention-days: 30
