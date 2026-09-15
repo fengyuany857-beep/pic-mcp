@@ -174,6 +174,7 @@ async def run() -> dict[str, Any]:
                 if cmp.decision != "DISTINCT":
                     observed_matches.append(record)
 
+    # Remove non-serializable helper objects.
     serial_downloaded: dict[str, list[dict[str, Any]]] = {}
     for provider, rows in downloaded.items():
         serial_downloaded[provider] = [
