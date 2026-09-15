@@ -28,6 +28,10 @@ jobs:
           git diff --exit-code 077f802e395e3d78e38e96292b4203655939bdd4 HEAD -- \
             trials/upo-01d trials/upo-02 trials/upo-03 trials/upo-04
 
+      - name: Typecheck Worker
+        run: |
+          npx --yes -p typescript@5.9.2 tsc -p trials/upo-06/worker/tsconfig.json
+
       - name: Check Cloudflare deployment credentials
         env:
           CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -38,10 +42,6 @@ jobs:
             exit 78
           fi
           echo 'Cloudflare credential presence: PASS'
-
-      - name: Typecheck Worker
-        run: |
-          npx --yes -p typescript@5.9.2 tsc -p trials/upo-06/worker/tsconfig.json
 
       - name: Deploy isolated PicMCP auth Worker
         id: deploy
