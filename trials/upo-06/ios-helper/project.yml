@@ -11,13 +11,13 @@ targets:
     platform: iOS
     deploymentTarget: "17.0"
     sources:
-      - path: Sources
+      - path: ../ios-helper-v2/Sources
         excludes:
           - Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.picmcp.authhelper
-        INFOPLIST_FILE: Sources/Info.plist
+        INFOPLIST_FILE: ../ios-helper-v2/Sources/Info.plist
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Manual
         CURRENT_PROJECT_VERSION: "1"
