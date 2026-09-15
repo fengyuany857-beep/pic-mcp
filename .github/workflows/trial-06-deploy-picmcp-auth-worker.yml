@@ -1,0 +1,100 @@
+name: Trial 06 - Deploy PicMCP Pixiv Auth Worker
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - 'trials/upo-06/worker/**'
+      - '.github/workflows/trial-06-deploy-picmcp-auth-worker.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-picmcp-auth-worker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout PicMCP
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify frozen prior trials untouched
+        run: |
+          git diff --exit-code 077f802e395e3d78e38e96292b4203655939bdd4 HEAD -- \
+            trials/upo-01d trials/upo-02 trials/upo-03 trials/upo-04
+
+      - name: Check Cloudflare deployment credentials
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ACCOUNT_ID" ]; then
+            echo '::error::PicMCP repository is missing CLOUDFLARE_API_TOKEN and/or CLOUDFLARE_ACCOUNT_ID.'
+            exit 78
+          fi
+          echo 'Cloudflare credential presence: PASS'
+
+      - name: Typecheck Worker
+        run: |
+          npx --yes -p typescript@5.9.2 tsc -p trials/upo-06/worker/tsconfig.json
+
+      - name: Deploy isolated PicMCP auth Worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.131.2'
+          workingDirectory: 'trials/upo-06/worker'
+          command: deploy
+
+      - name: Verify deployed HTTPS health and session issuance
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOYMENT_URL"
+          printf '%s\n' "$DEPLOYMENT_URL" > /tmp/deployment-url.txt
+          curl --fail --silent --show-error "$DEPLOYMENT_URL/health" > /tmp/health.json
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'content-type: application/json' \
+            -d '{}' \
+            "$DEPLOYMENT_URL/auth/pixiv/mobile/session" > /tmp/session.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          health = json.loads(Path('/tmp/health.json').read_text())
+          session = json.loads(Path('/tmp/session.json').read_text())
+          assert health.get('ok') is True
+          assert health.get('service') == 'pic-mcp-auth-trial06'
+          assert session.get('status') == 'PENDING'
+          sid = session.get('session_id')
+          assert isinstance(sid, str) and len(sid) >= 32
+          assert session.get('expires_in_seconds') == 300
+          # Do not print the one-time session id into Actions logs.
+          print('REMOTE_HEALTH_PASS')
+          print('REMOTE_SESSION_ISSUANCE_PASS')
+          PY
+
+      - name: Write safe deployment evidence
+        if: always()
+        run: |
+          mkdir -p trials/upo-06/artifacts/deploy
+          if [ -f /tmp/deployment-url.txt ]; then cp /tmp/deployment-url.txt trials/upo-06/artifacts/deploy/deployment-url.txt; fi
+          if [ -f /tmp/health.json ]; then cp /tmp/health.json trials/upo-06/artifacts/deploy/health.json; fi
+          printf 'head=%s\nrun_id=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > trials/upo-06/artifacts/deploy/provenance.txt
+
+      - name: Upload safe deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trial-06-picmcp-auth-worker-deploy-${{ github.run_number }}
+          path: trials/upo-06/artifacts/deploy/
+          if-no-files-found: warn
+          retention-days: 30
