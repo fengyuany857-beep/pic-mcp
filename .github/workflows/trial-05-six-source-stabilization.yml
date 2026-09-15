@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout PicMCP Trial branch
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Checkout pinned Booru organ
         uses: actions/checkout@v4
