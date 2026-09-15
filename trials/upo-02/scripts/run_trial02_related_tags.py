@@ -107,6 +107,8 @@ async def run() -> dict[str, Any]:
             if not preference_tags:
                 raise RuntimeError("typed expansion produced no usable preference tags")
 
+            # Use the top co-occurrence tags as real retrieval expansion. We do
+            # not modify the frozen Trial 01 recommender core.
             retrieval_tags = [x.tag for x in sorted(co, key=lambda x: -x.weight)[:3]]
             combined_posts: list[dict[str, Any]] = []
             retrieval: list[dict[str, Any]] = []
