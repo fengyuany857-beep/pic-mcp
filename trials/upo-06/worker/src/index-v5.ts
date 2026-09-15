@@ -13,7 +13,7 @@ interface D1Database {
 interface Env { AUTH_DB: D1Database }
 
 const PIXIV_API_BASE = "https://app-api.pixiv.net";
-const PIXIV_ANDROID_UA = "PixivAndroidApp/5.0.234 (Android 11; Pixel 5)";
+const PIXIV_IOS_UA = "PixivIOSApp/7.13.3 (iOS 14.6; iPhone13,2)";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -56,13 +56,17 @@ async function bookmarkPage(
     const response = await fetch(url, {
       headers: {
         authorization: `Bearer ${accessToken}`,
-        "user-agent": PIXIV_ANDROID_UA,
+        "app-os": "ios",
+        "app-os-version": "14.6",
+        "user-agent": PIXIV_IOS_UA,
         "accept-language": "zh-CN",
       },
     });
+    const contentType = response.headers.get("content-type") ?? "unknown";
     const body: any = await response.json().catch(() => null);
     if (!response.ok || !body || !Array.isArray(body.illusts)) {
-      return { ok: false, count: 0, ids: [], error: `HTTP_${response.status}` };
+      const safeType = contentType.split(";", 1)[0].slice(0, 64).replace(/[^a-zA-Z0-9.+\-_/]/g, "_");
+      return { ok: false, count: 0, ids: [], error: `HTTP_${response.status}_${safeType}` };
     }
     return {
       ok: true,
