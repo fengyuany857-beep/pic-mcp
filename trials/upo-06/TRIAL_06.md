@@ -67,20 +67,41 @@ Expected production flow:
 
 ## Verification gates
 
-- `BRIDGE_CORE_CONTRACT_PASS`
-- `SESSION_EXPIRY_PASS`
-- `SESSION_REPLAY_GUARD_PASS`
-- `TOKEN_RESPONSE_REDACTION_PASS`
-- `TOKEN_EXCHANGE_REQUEST_SHAPE_PASS`
-- `IOS_HELPER_BUILD_PASS`
-- `UNSIGNED_IPA_PASS`
-- `IPHONE_SYSTEM_AUTH_SESSION_PASS` — requires real signed install on user device
-- `PIXIV_CALLBACK_PASS` — requires real user login
-- `SERVER_TOKEN_EXCHANGE_LIVE_PASS` — requires reachable HTTPS PicMCP bridge
-- `USER_BOOKMARKS_READ_PASS` — final live gate
+- `BRIDGE_CORE_CONTRACT_PASS = PASS`
+- `SESSION_EXPIRY_PASS = PASS`
+- `SESSION_REPLAY_GUARD_PASS = PASS`
+- `TOKEN_RESPONSE_REDACTION_PASS = PASS`
+- `TOKEN_EXCHANGE_REQUEST_SHAPE_PASS = PASS`
+- `IOS_HELPER_BUILD_PASS = PASS`
+- `UNSIGNED_IPA_PASS = PASS`
+- `IPHONE_SYSTEM_AUTH_SESSION_PASS = UNKNOWN` — requires real signed install on user device
+- `PIXIV_CALLBACK_PASS = UNKNOWN` — requires real user login
+- `SERVER_TOKEN_EXCHANGE_LIVE_PASS = UNKNOWN` — requires reachable HTTPS PicMCP bridge
+- `USER_BOOKMARKS_READ_PASS = UNKNOWN` — final live gate
+
+## CI evidence
+
+- GitHub Actions run: `34997655140`
+- Tested head: `00ef890d3febdfdd3b1f49ce5f148003d53a2b4e`
+- `bridge-contract`: SUCCESS
+- `ios-helper-build`: SUCCESS
+- prior Trial 01D-04 immutability check: SUCCESS
+
+Artifacts:
+
+- `trial-06-pixiv-mobile-oauth-helper-1`
+  - Artifact ID: `10408825174`
+  - archive digest: `sha256:d3041f2334327e644a0d33f458e9a5e897bf7f40f50c4167f7c35a210dcc5ff0`
+  - contains unsigned IPA + Xcode/XcodeGen/build evidence
+- `trial-06-pixiv-mobile-oauth-bridge-1`
+  - Artifact ID: `10408257852`
+  - archive digest: `sha256:574f1c158d14ad371f22ae96a27b391857a0db83dee68d3be4bd65cfa8647aad`
+  - contains Python contract-test evidence
 
 ## Current state
 
-Implementation is isolated on Trial 06. CI evidence is required before any build gate is upgraded from UNKNOWN/PENDING.
+Build/contract stage: `PASS`.
+
+Real user outcome remains `PARTIAL` until a signed helper runs on the user's iPhone against a reachable HTTPS PicMCP bridge, captures the real Pixiv callback, completes server-side token exchange, and reads the user's bookmarks.
 
 No deployment is authorized by this trial. A public HTTPS bridge must not be deployed automatically.
