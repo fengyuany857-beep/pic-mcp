@@ -1,0 +1,65 @@
+name: Trial 01D - Real Upstream Booru MCP E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'trials/upo-01d/**'
+      - '.github/workflows/trial-01d-real-upstream.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-upstream-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout trial harness
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned upstream organ
+        uses: actions/checkout@v4
+        with:
+          repository: echo-xianyu/Booru-Pictag-Get-MCP
+          ref: ed234568fc376517d0abc5a377d65af37981b059
+          path: trials/upo-01d/upstream
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install pinned runtime and trial dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'mcp==1.30.0' 'pydantic>=2,<3' 'scikit-learn>=1.5,<2' pytest
+          python -m pip install './trials/upo-01d/upstream[http2]'
+
+      - name: Capture environment fingerprint
+        working-directory: trials/upo-01d
+        run: |
+          mkdir -p artifacts/trial01d
+          python --version | tee artifacts/trial01d/python-version.txt
+          python -m pip freeze > artifacts/trial01d/pip-freeze.txt
+          uname -a > artifacts/trial01d/uname.txt
+          git -C upstream rev-parse HEAD > artifacts/trial01d/upstream-commit.txt
+
+      - name: Run real upstream MCP E2E
+        working-directory: trials/upo-01d
+        env:
+          PYTHONPATH: ${{ github.workspace }}/trials/upo-01d/src
+          PYTHONUNBUFFERED: '1'
+        run: python scripts/run_real_upstream_e2e.py
+
+      - name: Upload Trial 01D evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trial-01d-evidence-${{ github.run_attempt }}
+          path: trials/upo-01d/artifacts/trial01d/
+          if-no-files-found: warn
+          retention-days: 30
