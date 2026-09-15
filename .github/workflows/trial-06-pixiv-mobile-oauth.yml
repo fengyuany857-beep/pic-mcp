@@ -1,0 +1,138 @@
+name: Trial 06 - Pixiv Mobile OAuth Helper
+
+on:
+  push:
+    branches: ['trial/upo-06-pixiv-mobile-oauth']
+    paths:
+      - 'trials/upo-06/**'
+      - '.github/workflows/trial-06-pixiv-mobile-oauth.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout PicMCP
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install contract-test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'pytest>=8,<9' 'httpx>=0.27,<1' 'starlette>=0.45,<1'
+
+      - name: Verify prior trials untouched
+        run: |
+          git diff --exit-code 077f802e395e3d78e38e96292b4203655939bdd4..HEAD -- \
+            trials/upo-01d trials/upo-02 trials/upo-03 trials/upo-04
+
+      - name: Run server-side bridge contract tests
+        working-directory: trials/upo-06
+        run: |
+          mkdir -p artifacts/bridge
+          python --version | tee artifacts/bridge/python-version.txt
+          python -m pip freeze > artifacts/bridge/pip-freeze.txt
+          python -m py_compile server/mobile_auth_bridge.py server/http_app.py
+          python -m pytest -q tests/test_mobile_auth_bridge.py | tee artifacts/bridge/pytest.txt
+
+      - name: Upload bridge evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trial-06-pixiv-mobile-oauth-bridge-${{ github.run_number }}
+          path: trials/upo-06/artifacts/bridge/
+          if-no-files-found: warn
+          retention-days: 30
+
+  ios-helper-build:
+    runs-on: macos-15
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout PicMCP
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify prior trials untouched
+        run: |
+          git diff --exit-code 077f802e395e3d78e38e96292b4203655939bdd4..HEAD -- \
+            trials/upo-01d trials/upo-02 trials/upo-03 trials/upo-04
+
+      - name: Install pinned XcodeGen 2.46.0
+        run: |
+          curl -fL --retry 3 \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            -o /tmp/xcodegen.zip
+          echo '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  /tmp/xcodegen.zip' \
+            | shasum -a 256 -c -
+          rm -rf /tmp/xcodegen-unpacked
+          mkdir -p /tmp/xcodegen-unpacked
+          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen-unpacked
+          XCODEGEN_BIN="$(find /tmp/xcodegen-unpacked -type f -name xcodegen -perm +111 | head -n 1)"
+          test -n "$XCODEGEN_BIN"
+          echo "XCODEGEN_BIN=$XCODEGEN_BIN" >> "$GITHUB_ENV"
+          "$XCODEGEN_BIN" --version
+
+      - name: Generate Xcode project
+        working-directory: trials/upo-06/ios-helper
+        run: |
+          "$XCODEGEN_BIN" generate --spec project.yml
+          xcodebuild -list -project PicMCPAuthHelper.xcodeproj
+
+      - name: Build unsigned iPhone app
+        working-directory: trials/upo-06/ios-helper
+        run: |
+          mkdir -p artifacts
+          xcodebuild -version | tee artifacts/xcode-version.txt
+          "$XCODEGEN_BIN" --version | tee artifacts/xcodegen-version.txt
+          set -o pipefail
+          xcodebuild \
+            -project PicMCPAuthHelper.xcodeproj \
+            -scheme PicMCPAuthHelper \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM='' \
+            build | tee artifacts/xcodebuild.log
+
+      - name: Package unsigned IPA
+        working-directory: trials/upo-06/ios-helper
+        run: |
+          APP_PATH="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          rm -rf artifacts/Payload
+          mkdir -p artifacts/Payload
+          cp -R "$APP_PATH" artifacts/Payload/
+          (
+            cd artifacts
+            zip -qry PicMCPAuthHelper-unsigned.ipa Payload
+            shasum -a 256 PicMCPAuthHelper-unsigned.ipa > PicMCPAuthHelper-unsigned.ipa.sha256
+          )
+
+      - name: Upload unsigned helper IPA and build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trial-06-pixiv-mobile-oauth-helper-${{ github.run_number }}
+          path: |
+            trials/upo-06/ios-helper/artifacts/PicMCPAuthHelper-unsigned.ipa
+            trials/upo-06/ios-helper/artifacts/PicMCPAuthHelper-unsigned.ipa.sha256
+            trials/upo-06/ios-helper/artifacts/xcode-version.txt
+            trials/upo-06/ios-helper/artifacts/xcodegen-version.txt
+            trials/upo-06/ios-helper/artifacts/xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 30
