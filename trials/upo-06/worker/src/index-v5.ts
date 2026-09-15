@@ -131,13 +131,14 @@ async function completeFromIOSLocalToken(request: Request, env: Env): Promise<Re
     bookmarkPage(accessToken, userId, "private"),
   ]);
   if (!publicBookmarks.ok && !privateBookmarks.ok) {
+    const safeErrors = [publicBookmarks.error, privateBookmarks.error].filter(Boolean) as string[];
     return json({
       status: "ERROR",
       error: "PIXIV_API_PROBE_FAILED",
-      message: "Pixiv token was received from iPhone, but the Worker could not read bookmarks.",
+      message: `Pixiv token was received from iPhone, but the Worker could not read bookmarks (${safeErrors.join(", ") || "UNKNOWN"}).`,
       bookmarks_probe: {
         status: "FAIL",
-        errors: [publicBookmarks.error, privateBookmarks.error].filter(Boolean),
+        errors: safeErrors,
       },
     }, 502);
   }
