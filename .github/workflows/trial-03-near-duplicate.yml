@@ -1,0 +1,73 @@
+name: Trial 03 - Near Duplicate E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'trials/upo-01d/**'
+      - 'trials/upo-02/**'
+      - 'trials/upo-03/**'
+      - '.github/workflows/trial-03-near-duplicate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  near-duplicate-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout trial harness
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned upstream organ
+        uses: actions/checkout@v4
+        with:
+          repository: echo-xianyu/Booru-Pictag-Get-MCP
+          ref: ed234568fc376517d0abc5a377d65af37981b059
+          path: trials/upo-03/upstream
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install pinned runtime and reused organs
+        working-directory: trials/upo-03
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'mcp==1.30.0' 'ImageHash==4.3.2' 'Pillow>=10,<12' 'httpx[http2]>=0.27,<1'
+          python -m pip install './upstream[http2]'
+
+      - name: Capture environment fingerprint
+        working-directory: trials/upo-03
+        run: |
+          mkdir -p artifacts/trial03
+          python --version | tee artifacts/trial03/python-version.txt
+          python -m pip freeze > artifacts/trial03/pip-freeze.txt
+          git -C upstream rev-parse HEAD > artifacts/trial03/upstream-commit.txt
+          sha256sum src/near_duplicate.py scripts/run_trial03_near_duplicate.py scripts/run_trial03b_cross_provider.py > artifacts/trial03/trial-code-sha256.txt
+
+      - name: Run Trial 03 controlled plus live E2E
+        working-directory: trials/upo-03
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python scripts/run_trial03_near_duplicate.py
+
+      - name: Run Trial 03B cross-provider probe
+        working-directory: trials/upo-03
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python scripts/run_trial03b_cross_provider.py
+
+      - name: Upload Trial 03 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trial-03-near-duplicate-evidence-${{ github.run_number }}
+          path: trials/upo-03/artifacts/trial03/
+          if-no-files-found: warn
+          retention-days: 30
