@@ -212,9 +212,6 @@ async def probe_booru_sources() -> dict[str, Any]:
                     record["payload_source"] = payload_source
                     record["post_count"] = len(payload.get("posts", []))
 
-                    # A safe-only fixture can legitimately be empty on Rule34.
-                    # Retry once with an all-rating fixture to distinguish EMPTY_VALID
-                    # from a source that cannot return candidates at all.
                     if provider == "rule34" and not payload.get("posts"):
                         fallback_result, fallback_args = await call_search_posts(
                             session,
@@ -237,6 +234,24 @@ async def probe_booru_sources() -> dict[str, Any]:
                                 payload_source = fallback_source
                                 record["fixture_fallback_used"] = True
                                 record["post_count"] = len(payload.get("posts", []))
+
+                    # The selected upstream explicitly documents Rule34 API
+                    # credentials as required since 2025-08. In our live run,
+                    # the unauthenticated endpoint returns HTTP 200 with an
+                    # empty list for both safe and all-rating fixtures. Treat
+                    # that as a credential gate, not evidence that the source
+                    # contains no matching posts.
+                    if (
+                        provider == "rule34"
+                        and not payload.get("posts")
+                        and not all(secret_presence("rule34").values())
+                    ):
+                        record["source_search"] = "AUTH_REQUIRED"
+                        record["canonicalize"] = "PENDING_AUTH"
+                        record["media_gateway"] = "PENDING_AUTH"
+                        record["render_url_contract"] = "PENDING_AUTH"
+                        output[provider] = record
+                        continue
 
                     if not payload.get("posts"):
                         record["source_search"] = "EMPTY_VALID"
@@ -366,6 +381,7 @@ async def run() -> dict[str, Any]:
         ),
         "notes": [
             "Credential-blocked providers are not promoted to PASS.",
+            "Rule34 HTTP 200 empty unauthenticated responses are classified using the selected upstream's documented credential requirement.",
             "Pixiv proxy contract PASS is not a live Pixiv media fetch PASS.",
             "AIBooru browser-header diagnostic is evidence only, not an automatic implementation switch.",
             "Browser Gallery rendering is outside Trial 05 and remains owned by Trial 04.",
