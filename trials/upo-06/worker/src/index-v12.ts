@@ -168,11 +168,6 @@ function createPublicReadMcpServer(env: Env): McpServer {
   return server;
 }
 
-const publicMcpHandler = createMcpHandler(
-  (env: Env) => createPublicReadMcpServer(env),
-  { route: "/mcp" },
-);
-
 /**
  * Trial 06 v12 removes OAuth from the ChatGPT read surface only.
  *
@@ -186,7 +181,10 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/mcp") {
-      return publicMcpHandler(request, env, ctx);
+      return createMcpHandler(
+        () => createPublicReadMcpServer(env),
+        { route: "/mcp" },
+      )(request, env, ctx);
     }
 
     if (request.method === "GET" && url.pathname === "/health") {
