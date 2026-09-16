@@ -66,7 +66,7 @@ jobs:
 
           mkdir -p /tmp/oauth-safe
           i=0
-          while IFS= read -r key; do
+          while IFS= read -r key || [ -n "$key" ]; do
             [ -n "$key" ] || continue
             encoded="$(python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$key")"
             curl --fail --silent --show-error \
@@ -76,7 +76,7 @@ jobs:
           done < /tmp/client-keys.txt
 
           i=0
-          while IFS= read -r key; do
+          while IFS= read -r key || [ -n "$key" ]; do
             [ -n "$key" ] || continue
             encoded="$(python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$key")"
             curl --fail --silent --show-error \
