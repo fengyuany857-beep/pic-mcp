@@ -143,6 +143,11 @@ function createPublicReadMcpServer(env: Env): McpServer {
     "get_my_favorites",
     {
       description: "Read the public portion of the latest iPhone-synchronized Pixiv favorites snapshot from PicMCP. No OAuth is required. Read-only; this is not a live Pixiv API call.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+      },
       inputSchema: {
         source: z.literal("pixiv").optional(),
         visibility: z.literal("public").optional(),
