@@ -28,6 +28,15 @@ jobs:
           git diff --exit-code 077f802e395e3d78e38e96292b4203655939bdd4 HEAD -- \
             trials/upo-01d trials/upo-02 trials/upo-03 trials/upo-04
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install pinned Worker MCP dependencies
+        working-directory: trials/upo-06/worker
+        run: npm install --no-audit --no-fund
+
       - name: Typecheck Worker
         run: |
           npx --yes -p typescript@5.9.2 tsc -p trials/upo-06/worker/tsconfig.json
@@ -53,7 +62,7 @@ jobs:
           workingDirectory: 'trials/upo-06/worker'
           command: deploy
 
-      - name: Verify deployed HTTPS health and session issuance
+      - name: Verify deployed HTTPS health, session issuance, and MCP auth gate
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
         run: |
@@ -66,20 +75,74 @@ jobs:
             -H 'content-type: application/json' \
             -d '{}' \
             "$DEPLOYMENT_URL/auth/pixiv/mobile/session" > /tmp/session.json
+          MCP_STATUS="$(curl --silent --output /tmp/mcp-unauthorized.json --write-out '%{http_code}' \
+            -X POST -H 'content-type: application/json' -d '{}' "$DEPLOYMENT_URL/mcp")"
+          test "$MCP_STATUS" = '401'
           python - <<'PY'
           import json
           from pathlib import Path
           health = json.loads(Path('/tmp/health.json').read_text())
           session = json.loads(Path('/tmp/session.json').read_text())
+          mcp_denied = json.loads(Path('/tmp/mcp-unauthorized.json').read_text())
           assert health.get('ok') is True
           assert health.get('service') == 'pic-mcp-auth-trial06'
+          assert health.get('mcp') == 'bearer-gated'
+          assert health.get('mcp_endpoint') == '/mcp'
           assert session.get('status') == 'PENDING'
           sid = session.get('session_id')
           assert isinstance(sid, str) and len(sid) >= 32
           assert session.get('expires_in_seconds') == 300
-          # Do not print the one-time session id into Actions logs.
+          assert mcp_denied.get('error') == 'MCP_AUTH_REQUIRED'
           print('REMOTE_HEALTH_PASS')
           print('REMOTE_SESSION_ISSUANCE_PASS')
+          print('REMOTE_MCP_UNAUTHORIZED_GATE_PASS')
+          PY
+
+      - name: Independently read back synchronized Pixiv library from remote D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: trials/upo-06/worker
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@4.131.2 d1 execute pic-mcp-auth-trial06-auth-db \
+            --remote --json \
+            --command "SELECT public_count, private_count, item_count, complete, truncated_reason, updated_at FROM user_library_state WHERE source='pixiv';" \
+            > /tmp/library-state.json
+          npx --yes wrangler@4.131.2 d1 execute pic-mcp-auth-trial06-auth-db \
+            --remote --json \
+            --command "SELECT COUNT(*) AS actual_count, SUM(CASE WHEN library_visibility='public' THEN 1 ELSE 0 END) AS actual_public, SUM(CASE WHEN library_visibility='private' THEN 1 ELSE 0 END) AS actual_private FROM user_library_items WHERE source='pixiv';" \
+            > /tmp/library-counts.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          def rows(path):
+              raw = json.loads(Path(path).read_text())
+              blocks = raw if isinstance(raw, list) else [raw]
+              for block in blocks:
+                  if isinstance(block, dict) and isinstance(block.get('results'), list):
+                      return block['results']
+              raise AssertionError(f'No D1 results in {path}')
+
+          state_rows = rows('/tmp/library-state.json')
+          count_rows = rows('/tmp/library-counts.json')
+          assert len(state_rows) == 1, state_rows
+          assert len(count_rows) == 1, count_rows
+          state = state_rows[0]
+          counts = count_rows[0]
+          item_count = int(state['item_count'])
+          public_count = int(state['public_count'])
+          private_count = int(state['private_count'])
+          actual_count = int(counts['actual_count'])
+          actual_public = int(counts['actual_public'] or 0)
+          actual_private = int(counts['actual_private'] or 0)
+          assert item_count > 0
+          assert item_count == actual_count
+          assert public_count == actual_public
+          assert private_count == actual_private
+          assert item_count == public_count + private_count
+          print(f'REMOTE_D1_LIBRARY_READBACK_PASS item_count={item_count} public={public_count} private={private_count} complete={state["complete"]}')
           PY
 
       - name: Write safe deployment evidence
