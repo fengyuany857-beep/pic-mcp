@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
-import legacyWorker from "./legacy-bridge";
 import { type D1Database, readPublicFavorites } from "./library";
 
 interface Env { AUTH_DB: D1Database }
@@ -55,7 +54,7 @@ function createPublicReadMcpServer(env: Env): McpServer {
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/mcp") {
@@ -66,21 +65,20 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/health") {
-      const response = await legacyWorker.fetch(request, env as any, ctx);
-      const body = await response.clone().json().catch(() => ({})) as Record<string, unknown>;
       return json({
-        ...body,
-        runtime: "pic-mcp-v0.5-build02",
+        ok: true,
+        service: "pic-mcp",
+        version: "0.5.0-build02",
+        runtime: "formal-read-plane",
         mcp: "no-auth-read-only",
         mcp_auth: "none",
         mcp_endpoint: "/mcp",
         mcp_visibility: "public-only",
         library_read: "d1-snapshot",
-        promoted_from: "trial/upo-06 index-v12",
-        legacy_bridge: "trial/upo-06 index-v11",
-      }, response.status);
+        snapshot_writer: "separate-trial06-sync-service",
+      });
     }
 
-    return legacyWorker.fetch(request, env as any, ctx);
+    return json({ status: "ERROR", error: "NOT_FOUND" }, 404);
   },
 };
