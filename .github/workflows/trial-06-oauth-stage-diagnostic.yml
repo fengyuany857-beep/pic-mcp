@@ -1,0 +1,121 @@
+name: Trial 06 - OAuth Stage Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - '.github/workflows/trial-06-oauth-stage-diagnostic.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-oauth-stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Resolve OAuth KV namespace
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KV_TITLE: pic-mcp-auth-trial06-oauth
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            "${API}?per_page=100" > /tmp/namespaces.json
+          python - <<'PY'
+          import json, os
+          data = json.load(open('/tmp/namespaces.json'))
+          title = os.environ['KV_TITLE']
+          ids = [x['id'] for x in data.get('result', []) if x.get('title') == title]
+          assert len(ids) == 1, f'Expected one OAuth KV namespace, got {len(ids)}'
+          open('/tmp/kv-id.txt','w').write(ids[0])
+          print('OAUTH_KV_RESOLVE_PASS')
+          PY
+
+      - name: Inspect OAuth stage without exposing credentials
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          KV_ID="$(cat /tmp/kv-id.txt)"
+          BASE="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${KV_ID}"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            "${BASE}/keys?limit=1000" > /tmp/keys.json
+
+          python - <<'PY'
+          import json
+          data = json.load(open('/tmp/keys.json'))
+          names = [x.get('name','') for x in data.get('result', [])]
+          prefixes = {'client': [], 'grant': [], 'token': [], 'other': []}
+          for name in names:
+              if name.startswith('client:'): prefixes['client'].append(name)
+              elif name.startswith('grant:'): prefixes['grant'].append(name)
+              elif name.startswith('token:'): prefixes['token'].append(name)
+              else: prefixes['other'].append(name)
+          print('OAUTH_KV_KEY_COUNTS', {k: len(v) for k,v in prefixes.items()})
+          open('/tmp/client-keys.txt','w').write('\n'.join(prefixes['client']))
+          open('/tmp/grant-keys.txt','w').write('\n'.join(prefixes['grant']))
+          PY
+
+          mkdir -p /tmp/oauth-safe
+          i=0
+          while IFS= read -r key; do
+            [ -n "$key" ] || continue
+            encoded="$(python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$key")"
+            curl --fail --silent --show-error \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              "${BASE}/values/${encoded}" > "/tmp/oauth-safe/client-${i}.json"
+            i=$((i+1))
+          done < /tmp/client-keys.txt
+
+          i=0
+          while IFS= read -r key; do
+            [ -n "$key" ] || continue
+            encoded="$(python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$key")"
+            curl --fail --silent --show-error \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              "${BASE}/values/${encoded}" > "/tmp/oauth-safe/grant-${i}.json"
+            i=$((i+1))
+          done < /tmp/grant-keys.txt
+
+          python - <<'PY'
+          import glob, json
+          from urllib.parse import urlparse
+
+          clients=[]
+          for path in glob.glob('/tmp/oauth-safe/client-*.json'):
+              obj=json.load(open(path))
+              clients.append({
+                  'token_endpoint_auth_method': obj.get('tokenEndpointAuthMethod'),
+                  'grant_types': obj.get('grantTypes'),
+                  'response_types': obj.get('responseTypes'),
+                  'redirect_hosts': sorted({urlparse(u).netloc for u in obj.get('redirectUris', []) if isinstance(u,str)}),
+              })
+
+          grants=[]
+          for path in glob.glob('/tmp/oauth-safe/grant-*.json'):
+              obj=json.load(open(path))
+              grants.append({
+                  'scope': obj.get('scope'),
+                  'resource_present': bool(obj.get('resource')),
+                  'auth_code_id_present': bool(obj.get('authCodeId')),
+                  'auth_code_wrapped_key_present': bool(obj.get('authCodeWrappedKey')),
+                  'pkce_challenge_present': bool(obj.get('codeChallenge')),
+                  'refresh_token_id_present': bool(obj.get('refreshTokenId')),
+                  'refresh_token_wrapped_key_present': bool(obj.get('refreshTokenWrappedKey')),
+                  'redirect_host': urlparse(obj.get('redirectUri','')).netloc if isinstance(obj.get('redirectUri'),str) else '',
+              })
+
+          token_exchanged = sum(1 for g in grants if g['refresh_token_id_present'])
+          awaiting_exchange = sum(1 for g in grants if g['auth_code_wrapped_key_present'] and not g['refresh_token_id_present'])
+          print('OAUTH_CLIENT_SAFE_SUMMARY', clients)
+          print('OAUTH_GRANT_SAFE_SUMMARY', grants)
+          print(f'OAUTH_STAGE_SUMMARY grants={len(grants)} token_exchanged={token_exchanged} awaiting_exchange={awaiting_exchange}')
+          PY
