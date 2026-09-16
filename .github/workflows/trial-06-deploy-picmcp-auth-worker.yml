@@ -52,6 +52,58 @@ jobs:
           fi
           echo 'Cloudflare credential presence: PASS'
 
+      - name: Ensure isolated OAuth KV namespace and bind it for this deployment
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          KV_TITLE: pic-mcp-auth-trial06-oauth
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            "${API}?per_page=100&order=title&direction=asc" > /tmp/kv-list.json
+
+          KV_ID="$(python - <<'PY'
+          import json, os
+          data = json.load(open('/tmp/kv-list.json'))
+          title = os.environ['KV_TITLE']
+          matches = [x['id'] for x in data.get('result', []) if x.get('title') == title]
+          print(matches[0] if matches else '')
+          PY
+          )"
+
+          if [ -z "$KV_ID" ]; then
+            echo 'OAuth KV namespace not found; creating isolated Trial 06 namespace.'
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              --data "{\"title\":\"${KV_TITLE}\"}" \
+              "$API" > /tmp/kv-create.json
+            KV_ID="$(python - <<'PY'
+          import json
+          data = json.load(open('/tmp/kv-create.json'))
+          result = data.get('result') or {}
+          print(result.get('id', ''))
+          PY
+            )"
+          fi
+
+          test -n "$KV_ID"
+          printf '%s\n' "$KV_ID" > /tmp/oauth-kv-id.txt
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          cfg_path = Path('trials/upo-06/worker/wrangler.jsonc')
+          cfg = json.loads(cfg_path.read_text())
+          kv_id = Path('/tmp/oauth-kv-id.txt').read_text().strip()
+          cfg['kv_namespaces'] = [{'binding': 'OAUTH_KV', 'id': kv_id}]
+          cfg_path.write_text(json.dumps(cfg, indent=2) + '\n')
+          print('OAUTH_KV_BINDING_READY')
+          PY
+
       - name: Deploy isolated PicMCP auth Worker
         id: deploy
         uses: cloudflare/wrangler-action@v4
@@ -62,7 +114,7 @@ jobs:
           workingDirectory: 'trials/upo-06/worker'
           command: deploy
 
-      - name: Verify deployed HTTPS health, session issuance, and MCP auth gate
+      - name: Verify deployed HTTPS health and OAuth discovery gates
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
         run: |
@@ -71,31 +123,69 @@ jobs:
           printf '%s\n' "$DEPLOYMENT_URL" > /tmp/deployment-url.txt
           curl --fail --silent --show-error "$DEPLOYMENT_URL/health" > /tmp/health.json
           curl --fail --silent --show-error \
-            -X POST \
-            -H 'content-type: application/json' \
-            -d '{}' \
-            "$DEPLOYMENT_URL/auth/pixiv/mobile/session" > /tmp/session.json
-          MCP_STATUS="$(curl --silent --output /tmp/mcp-unauthorized.json --write-out '%{http_code}' \
-            -X POST -H 'content-type: application/json' -d '{}' "$DEPLOYMENT_URL/mcp")"
-          test "$MCP_STATUS" = '401'
+            "$DEPLOYMENT_URL/.well-known/oauth-authorization-server" > /tmp/oauth-as.json
+          curl --fail --silent --show-error \
+            "$DEPLOYMENT_URL/.well-known/oauth-protected-resource/mcp" > /tmp/oauth-resource.json
+          curl --silent --show-error --dump-header /tmp/mcp-unauthorized.headers \
+            --output /tmp/mcp-unauthorized.body --write-out '%{http_code}' \
+            -X POST -H 'content-type: application/json' -d '{}' "$DEPLOYMENT_URL/mcp" \
+            > /tmp/mcp-status.txt
+
           python - <<'PY'
           import json
           from pathlib import Path
           health = json.loads(Path('/tmp/health.json').read_text())
-          session = json.loads(Path('/tmp/session.json').read_text())
-          mcp_denied = json.loads(Path('/tmp/mcp-unauthorized.json').read_text())
+          auth = json.loads(Path('/tmp/oauth-as.json').read_text())
+          resource = json.loads(Path('/tmp/oauth-resource.json').read_text())
+          status = Path('/tmp/mcp-status.txt').read_text().strip()
+          headers = Path('/tmp/mcp-unauthorized.headers').read_text().lower()
+          base = Path('/tmp/deployment-url.txt').read_text().strip()
+
           assert health.get('ok') is True
           assert health.get('service') == 'pic-mcp-auth-trial06'
-          assert health.get('mcp') == 'bearer-gated'
+          assert health.get('mcp') == 'oauth2.1'
           assert health.get('mcp_endpoint') == '/mcp'
-          assert session.get('status') == 'PENDING'
-          sid = session.get('session_id')
-          assert isinstance(sid, str) and len(sid) >= 32
-          assert session.get('expires_in_seconds') == 300
-          assert mcp_denied.get('error') == 'MCP_AUTH_REQUIRED'
+          assert health.get('oauth_scope') == 'favorites:read'
+
+          assert auth.get('issuer') == base
+          assert auth.get('authorization_endpoint') == base + '/authorize'
+          assert auth.get('token_endpoint') == base + '/oauth/token'
+          assert auth.get('registration_endpoint') == base + '/oauth/register'
+          assert 'authorization_code' in auth.get('grant_types_supported', [])
+          assert 'S256' in auth.get('code_challenge_methods_supported', [])
+
+          assert resource.get('resource') == base + '/mcp'
+          assert base in resource.get('authorization_servers', [])
+          assert 'favorites:read' in resource.get('scopes_supported', [])
+
+          assert status == '401', status
+          assert 'www-authenticate:' in headers
+          assert 'bearer' in headers
+          assert 'resource_metadata=' in headers
           print('REMOTE_HEALTH_PASS')
-          print('REMOTE_SESSION_ISSUANCE_PASS')
-          print('REMOTE_MCP_UNAUTHORIZED_GATE_PASS')
+          print('REMOTE_OAUTH_AUTHORIZATION_SERVER_METADATA_PASS')
+          print('REMOTE_OAUTH_PROTECTED_RESOURCE_METADATA_PASS')
+          print('REMOTE_MCP_OAUTH_CHALLENGE_PASS')
+          PY
+
+      - name: Verify mobile sync session route remains available
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            -X POST \
+            -H 'content-type: application/json' \
+            -d '{}' \
+            "$DEPLOYMENT_URL/auth/pixiv/mobile/session" > /tmp/session.json
+          python - <<'PY'
+          import json
+          data = json.load(open('/tmp/session.json'))
+          assert data.get('status') == 'PENDING'
+          sid = data.get('session_id')
+          assert isinstance(sid, str) and len(sid) >= 32
+          assert data.get('expires_in_seconds') == 300
+          print('REMOTE_SESSION_ISSUANCE_REGRESSION_PASS')
           PY
 
       - name: Independently read back synchronized Pixiv library from remote D1
@@ -151,6 +241,9 @@ jobs:
           mkdir -p trials/upo-06/artifacts/deploy
           if [ -f /tmp/deployment-url.txt ]; then cp /tmp/deployment-url.txt trials/upo-06/artifacts/deploy/deployment-url.txt; fi
           if [ -f /tmp/health.json ]; then cp /tmp/health.json trials/upo-06/artifacts/deploy/health.json; fi
+          if [ -f /tmp/oauth-as.json ]; then cp /tmp/oauth-as.json trials/upo-06/artifacts/deploy/oauth-authorization-server.json; fi
+          if [ -f /tmp/oauth-resource.json ]; then cp /tmp/oauth-resource.json trials/upo-06/artifacts/deploy/oauth-protected-resource.json; fi
+          if [ -f /tmp/oauth-kv-id.txt ]; then cp /tmp/oauth-kv-id.txt trials/upo-06/artifacts/deploy/oauth-kv-id.txt; fi
           printf 'head=%s\nrun_id=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > trials/upo-06/artifacts/deploy/provenance.txt
 
       - name: Upload safe deployment evidence
