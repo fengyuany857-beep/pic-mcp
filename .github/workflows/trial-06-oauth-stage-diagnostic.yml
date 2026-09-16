@@ -127,7 +127,8 @@ jobs:
           WORKER_HOST: pic-mcp-auth-trial06.3254849126a.workers.dev
         run: |
           set -euo pipefail
-          API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/observability/telemetry/query"
+          QUERY_API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/observability/telemetry/query"
+          KEYS_API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/observability/telemetry/keys"
 
           python - <<'PY'
           import json, os
@@ -138,6 +139,15 @@ jobs:
           start_ms = 1789540200000  # 2026-09-16T06:30:00Z
           end_ms = 1789552800000    # 2026-09-16T10:00:00Z
           host = os.environ['WORKER_HOST']
+
+          keys_payload = {
+              'datasets': [],
+              'from': start_ms,
+              'to': end_ms,
+              'limit': 1000,
+          }
+          Path('/tmp/obs-keys-request.json').write_text(json.dumps(keys_payload))
+
           targets = {
               'health': '/health',
               'authorize': '/authorize',
@@ -153,15 +163,27 @@ jobs:
                   'view': 'events',
                   'parameters': {
                       'datasets': [],
-                      'needle': {
+                      'filterCombination': 'and',
+                      'filters': [{
+                          'key': '$metadata.url',
+                          'operation': 'includes',
+                          'type': 'string',
                           'value': f'{host}{path}',
-                          'isRegex': False,
-                          'matchCase': False,
-                      },
+                      }],
                   },
               }
               Path(f'/tmp/obs-{label}-request.json').write_text(json.dumps(payload))
           PY
+
+          keys_status="$(curl --silent --show-error \
+            --output /tmp/obs-keys-response.json \
+            --write-out '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data-binary '@/tmp/obs-keys-request.json' \
+            "${KEYS_API}")"
+          printf '%s\n' "$keys_status" > /tmp/obs-keys-status.txt
 
           for label in health authorize register token; do
             status="$(curl --silent --show-error \
@@ -171,7 +193,7 @@ jobs:
               -H "Authorization: Bearer ${CF_API_TOKEN}" \
               -H 'Content-Type: application/json' \
               --data-binary "@/tmp/obs-${label}-request.json" \
-              "${API}")"
+              "${QUERY_API}")"
             printf '%s\n' "$status" > "/tmp/obs-${label}-status.txt"
           done
 
@@ -180,6 +202,23 @@ jobs:
           from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urlparse
+
+          keys_http = Path('/tmp/obs-keys-status.txt').read_text().strip()
+          url_key_present = False
+          if keys_http != '200':
+              print(f'OBSERVABILITY_KEYS_API=UNAVAILABLE http={keys_http}')
+          else:
+              keys_data = json.loads(Path('/tmp/obs-keys-response.json').read_text())
+              if not keys_data.get('success'):
+                  codes = [e.get('code') for e in keys_data.get('errors', []) if isinstance(e, dict) and e.get('code') is not None]
+                  print(f'OBSERVABILITY_KEYS_API=UNAVAILABLE error_codes={codes}')
+              else:
+                  keys = {item.get('key') for item in keys_data.get('result', []) if isinstance(item, dict)}
+                  url_key_present = '$metadata.url' in keys
+                  print(f'OBSERVABILITY_KEYS_COUNT {len(keys)}')
+                  print(f'OBSERVABILITY_METADATA_URL_KEY_PRESENT {url_key_present}')
+                  print(f'OBSERVABILITY_TRIGGER_KEY_PRESENT {"$metadata.trigger" in keys}')
+                  print(f'OBSERVABILITY_SERVICE_KEY_PRESENT {"$metadata.service" in keys}')
 
           targets = {
               'health': '/health',
@@ -232,7 +271,7 @@ jobs:
               print(f'OBSERVABILITY_{label.upper()}_COUNT {len(safe)}')
               print(f'OBSERVABILITY_{label.upper()}_SAFE_SUMMARY {safe}')
 
-          if api_ok:
+          if api_ok and url_key_present:
               positive_control = counts.get('health', 0) > 0
               print(f'OBSERVABILITY_POSITIVE_CONTROL {"PASS" if positive_control else "FAIL"}')
               if positive_control:
