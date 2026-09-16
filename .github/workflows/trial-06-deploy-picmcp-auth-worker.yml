@@ -114,22 +114,48 @@ jobs:
           workingDirectory: 'trials/upo-06/worker'
           command: deploy
 
-      - name: Verify deployed HTTPS health and OAuth discovery gates
+      - name: Verify deployed HTTPS no-auth MCP and legacy OAuth discovery
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
         run: |
           set -euo pipefail
           test -n "$DEPLOYMENT_URL"
           printf '%s\n' "$DEPLOYMENT_URL" > /tmp/deployment-url.txt
-          curl --fail --silent --show-error "$DEPLOYMENT_URL/health" > /tmp/health.json
+
+          # Cloudflare edge propagation can briefly serve the previous version.
+          for attempt in $(seq 1 12); do
+            curl --fail --silent --show-error "$DEPLOYMENT_URL/health" > /tmp/health.json
+            if python - <<'PY'
+          import json
+          data = json.load(open('/tmp/health.json'))
+          raise SystemExit(0 if data.get('mcp') == 'no-auth-read-only' and data.get('mcp_auth') == 'none' else 1)
+          PY
+            then
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              echo '::error::No-auth v12 health marker did not become visible.'
+              cat /tmp/health.json
+              exit 1
+            fi
+            sleep 2
+          done
+
           curl --fail --silent --show-error \
             "$DEPLOYMENT_URL/.well-known/oauth-authorization-server" > /tmp/oauth-as.json
           curl --fail --silent --show-error \
             "$DEPLOYMENT_URL/.well-known/oauth-protected-resource/mcp" > /tmp/oauth-resource.json
-          curl --silent --show-error --dump-header /tmp/mcp-unauthorized.headers \
-            --output /tmp/mcp-unauthorized.body --write-out '%{http_code}' \
-            -X POST -H 'content-type: application/json' -d '{}' "$DEPLOYMENT_URL/mcp" \
-            > /tmp/mcp-status.txt
+
+          cat > /tmp/mcp-init-request.json <<'JSON'
+          {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"picmcp-trial06-ci","version":"1.0.0"}}}
+          JSON
+          curl --silent --show-error --dump-header /tmp/mcp-init.headers \
+            --output /tmp/mcp-init.body --write-out '%{http_code}' \
+            -X POST \
+            -H 'content-type: application/json' \
+            -H 'accept: application/json, text/event-stream' \
+            --data-binary '@/tmp/mcp-init-request.json' \
+            "$DEPLOYMENT_URL/mcp" > /tmp/mcp-status.txt
 
           python - <<'PY'
           import json
@@ -138,37 +164,38 @@ jobs:
           auth = json.loads(Path('/tmp/oauth-as.json').read_text())
           resource = json.loads(Path('/tmp/oauth-resource.json').read_text())
           status = Path('/tmp/mcp-status.txt').read_text().strip()
-          headers = Path('/tmp/mcp-unauthorized.headers').read_text().lower()
+          headers = Path('/tmp/mcp-init.headers').read_text().lower()
+          body = Path('/tmp/mcp-init.body').read_text()
           base = Path('/tmp/deployment-url.txt').read_text().strip()
 
           assert health.get('ok') is True
           assert health.get('service') == 'pic-mcp-auth-trial06'
-          assert health.get('mcp') == 'oauth2.1'
+          assert health.get('mcp') == 'no-auth-read-only'
+          assert health.get('mcp_auth') == 'none'
           assert health.get('mcp_endpoint') == '/mcp'
-          assert health.get('oauth_scope') == 'favorites:read'
+          assert health.get('mcp_visibility') == 'public-only'
+          assert health.get('library_read') == 'd1-snapshot'
 
+          # Legacy OAuth endpoints remain available for rollback/history, but no
+          # longer gate the ChatGPT /mcp read surface.
           assert auth.get('issuer') == base
           assert auth.get('authorization_endpoint') == base + '/authorize'
           assert auth.get('token_endpoint') == base + '/oauth/token'
           assert auth.get('registration_endpoint') == base + '/oauth/register'
           assert 'authorization_code' in auth.get('grant_types_supported', [])
           assert 'S256' in auth.get('code_challenge_methods_supported', [])
-
           assert resource.get('resource') == base + '/mcp'
-          assert base in resource.get('authorization_servers', [])
-          assert 'favorites:read' in resource.get('scopes_supported', [])
 
-          assert status == '401', status
-          assert 'www-authenticate:' in headers
-          assert 'bearer' in headers
-          assert 'resource_metadata=' in headers
+          assert status == '200', (status, body[:500])
+          assert 'www-authenticate:' not in headers
+          assert 'protocolVersion' in body or 'protocolversion' in body.lower()
+          assert 'pic-mcp' in body
           print('REMOTE_HEALTH_PASS')
-          print('REMOTE_OAUTH_AUTHORIZATION_SERVER_METADATA_PASS')
-          print('REMOTE_OAUTH_PROTECTED_RESOURCE_METADATA_PASS')
-          print('REMOTE_MCP_OAUTH_CHALLENGE_PASS')
+          print('REMOTE_MCP_NO_AUTH_INITIALIZE_PASS')
+          print('REMOTE_OAUTH_LEGACY_DISCOVERY_PASS')
           PY
 
-      - name: Verify mobile sync session route remains available
+      - name: Verify mobile sync session and write boundary remain protected
         env:
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
         run: |
@@ -178,14 +205,31 @@ jobs:
             -H 'content-type: application/json' \
             -d '{}' \
             "$DEPLOYMENT_URL/auth/pixiv/mobile/session" > /tmp/session.json
+
+          curl --silent --show-error \
+            --output /tmp/write-boundary.json --write-out '%{http_code}' \
+            -X POST \
+            -H 'content-type: application/json' \
+            -d '{}' \
+            "$DEPLOYMENT_URL/auth/pixiv/mobile/complete-client-library" \
+            > /tmp/write-boundary-status.txt
+
           python - <<'PY'
           import json
+          from pathlib import Path
           data = json.load(open('/tmp/session.json'))
           assert data.get('status') == 'PENDING'
           sid = data.get('session_id')
           assert isinstance(sid, str) and len(sid) >= 32
           assert data.get('expires_in_seconds') == 300
+
+          status = Path('/tmp/write-boundary-status.txt').read_text().strip()
+          boundary = json.load(open('/tmp/write-boundary.json'))
+          assert status == '400', (status, boundary)
+          assert boundary.get('status') == 'ERROR'
+          assert boundary.get('error') in {'AUTH_TRANSPORT_REQUIRED', 'INVALID_JSON'}
           print('REMOTE_SESSION_ISSUANCE_REGRESSION_PASS')
+          print('REMOTE_PRIVATE_WRITE_BOUNDARY_PASS')
           PY
 
       - name: Independently read back synchronized Pixiv library from remote D1
@@ -243,6 +287,8 @@ jobs:
           if [ -f /tmp/health.json ]; then cp /tmp/health.json trials/upo-06/artifacts/deploy/health.json; fi
           if [ -f /tmp/oauth-as.json ]; then cp /tmp/oauth-as.json trials/upo-06/artifacts/deploy/oauth-authorization-server.json; fi
           if [ -f /tmp/oauth-resource.json ]; then cp /tmp/oauth-resource.json trials/upo-06/artifacts/deploy/oauth-protected-resource.json; fi
+          if [ -f /tmp/mcp-init.headers ]; then cp /tmp/mcp-init.headers trials/upo-06/artifacts/deploy/mcp-init.headers.txt; fi
+          if [ -f /tmp/mcp-init.body ]; then cp /tmp/mcp-init.body trials/upo-06/artifacts/deploy/mcp-init.body.txt; fi
           if [ -f /tmp/oauth-kv-id.txt ]; then cp /tmp/oauth-kv-id.txt trials/upo-06/artifacts/deploy/oauth-kv-id.txt; fi
           printf 'head=%s\nrun_id=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > trials/upo-06/artifacts/deploy/provenance.txt
 
