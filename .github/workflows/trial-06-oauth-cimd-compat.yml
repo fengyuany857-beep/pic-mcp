@@ -1,0 +1,167 @@
+name: Trial 06 - OAuth CIMD Compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - '.github/workflows/trial-06-oauth-cimd-compat.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-cimd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Resolve latest authorize request and compare public CIMD metadata safely
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_SERVICE: pic-mcp-auth-trial06
+        run: |
+          set -euo pipefail
+          QUERY_API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/observability/telemetry/query"
+
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          payload = {
+              'queryId': 'picmcp-latest-authorize-for-cimd',
+              'timeframe': {
+                  'from': 1789540200000,  # 2026-09-16T06:30:00Z
+                  'to': 1789556400000,    # 2026-09-16T11:00:00Z
+              },
+              'dry': True,
+              'limit': 200,
+              'view': 'events',
+              'parameters': {
+                  'datasets': [],
+                  'filterCombination': 'and',
+                  'filters': [
+                      {'key': '$metadata.service', 'operation': 'eq', 'type': 'string', 'value': os.environ['WORKER_SERVICE']},
+                      {'key': '$metadata.message', 'operation': 'includes', 'type': 'string', 'value': '/authorize'},
+                  ],
+              },
+          }
+          Path('/tmp/query.json').write_text(json.dumps(payload))
+          PY
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data-binary '@/tmp/query.json' \
+            "${QUERY_API}" > /tmp/result.json
+
+          python - <<'PY'
+          import json, re
+          from pathlib import Path
+          from urllib.parse import parse_qs, urlparse
+
+          data = json.loads(Path('/tmp/result.json').read_text())
+          assert data.get('success') is True, data.get('errors')
+          events = (((data.get('result') or {}).get('events') or {}).get('events') or [])
+          candidates = []
+          for event in events:
+              if not isinstance(event, dict):
+                  continue
+              metadata = event.get('$metadata') or {}
+              message = metadata.get('message') if isinstance(metadata, dict) else None
+              timestamp = event.get('timestamp')
+              if not isinstance(message, str) or not isinstance(timestamp, (int, float)):
+                  continue
+              match = re.search(r'\bGET\s+(https?://\S+)', message)
+              if not match:
+                  continue
+              parsed = urlparse(match.group(1))
+              if parsed.path != '/authorize':
+                  continue
+              query = parse_qs(parsed.query, keep_blank_values=True)
+              client_id = (query.get('client_id') or [None])[0]
+              redirect_uri = (query.get('redirect_uri') or [None])[0]
+              if not isinstance(client_id, str) or not client_id.startswith('https://chatgpt.com/'):
+                  continue
+              if not isinstance(redirect_uri, str) or not redirect_uri.startswith('https://chatgpt.com/'):
+                  continue
+              candidates.append((timestamp, client_id, redirect_uri))
+
+          assert candidates, 'No safe ChatGPT authorize GET request found'
+          _, client_id, redirect_uri = max(candidates, key=lambda x: x[0])
+          Path('/tmp/client-id.txt').write_text(client_id)
+          Path('/tmp/redirect-uri.txt').write_text(redirect_uri)
+
+          def classify_redirect(url):
+              path = urlparse(url).path
+              if path == '/connector_platform_oauth_redirect':
+                  return 'stable_platform'
+              if path.startswith('/connector/oauth/'):
+                  return 'connector_specific'
+              return 'other'
+
+          client_path = urlparse(client_id).path
+          client_shape = 'chatgpt_https_other'
+          if client_path.endswith('/client.json') or client_path.endswith('/client-metadata.json'):
+              client_shape = 'chatgpt_https_metadata_document'
+          print('AUTHORIZE_CLIENT_ID_KIND https_url')
+          print('AUTHORIZE_CLIENT_ID_HOST chatgpt.com')
+          print('AUTHORIZE_CLIENT_ID_SHAPE', client_shape)
+          print('AUTHORIZE_REDIRECT_KIND', classify_redirect(redirect_uri))
+          PY
+
+          CIMD_STATUS="$(curl --silent --show-error \
+            --output /tmp/cimd.json \
+            --write-out '%{http_code}' \
+            --location \
+            --max-redirs 3 \
+            --connect-timeout 10 \
+            --max-time 20 \
+            "$(cat /tmp/client-id.txt)")"
+          printf '%s\n' "$CIMD_STATUS" > /tmp/cimd-status.txt
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          status = Path('/tmp/cimd-status.txt').read_text().strip()
+          print('CIMD_FETCH_HTTP', status)
+          if status != '200':
+              raise SystemExit(0)
+
+          obj = json.loads(Path('/tmp/cimd.json').read_text())
+          actual_redirect = Path('/tmp/redirect-uri.txt').read_text().strip()
+          redirects = obj.get('redirect_uris') if isinstance(obj.get('redirect_uris'), list) else []
+
+          def classify(url):
+              if not isinstance(url, str):
+                  return 'non_string'
+              parsed = urlparse(url)
+              if parsed.netloc != 'chatgpt.com':
+                  return 'other_host'
+              if parsed.path == '/connector_platform_oauth_redirect':
+                  return 'stable_platform'
+              if parsed.path.startswith('/connector/oauth/'):
+                  return 'connector_specific'
+              return 'chatgpt_other'
+
+          redirect_kinds = sorted({classify(u) for u in redirects})
+          auth_methods = obj.get('token_endpoint_auth_methods_supported')
+          if not isinstance(auth_methods, list):
+              auth_methods = []
+          grant_types = obj.get('grant_types') if isinstance(obj.get('grant_types'), list) else []
+          response_types = obj.get('response_types') if isinstance(obj.get('response_types'), list) else []
+
+          print('CIMD_REDIRECT_COUNT', len(redirects))
+          print('CIMD_REDIRECT_KINDS', redirect_kinds)
+          print('CIMD_ACTUAL_REDIRECT_EXACT_MATCH', actual_redirect in redirects)
+          print('CIMD_TOKEN_ENDPOINT_AUTH_METHOD', obj.get('token_endpoint_auth_method'))
+          print('CIMD_TOKEN_ENDPOINT_AUTH_METHODS_SUPPORTED', sorted(str(x) for x in auth_methods))
+          print('CIMD_GRANT_TYPES', sorted(str(x) for x in grant_types))
+          print('CIMD_RESPONSE_TYPES', sorted(str(x) for x in response_types))
+          print('CIMD_JWKS_URI_PRESENT', isinstance(obj.get('jwks_uri'), str) and bool(obj.get('jwks_uri')))
+          print('CIMD_CLIENT_NAME_PRESENT', isinstance(obj.get('client_name'), str) and bool(obj.get('client_name')))
+          PY
