@@ -1,0 +1,17 @@
+{
+  "name": "pic-mcp-v05-build02",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-15",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "AUTH_DB",
+      "database_name": "pic-mcp-auth-trial06-auth-db",
+      "database_id": "5185cd45-caab-4de4-b868-daec1a827bbc"
+    }
+  ]
+}

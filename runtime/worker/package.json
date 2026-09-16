@@ -1,0 +1,20 @@
+{
+  "name": "pic-mcp-worker",
+  "version": "0.5.0-build02",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build:dry": "wrangler deploy --dry-run --outdir dist"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "0.10.3",
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.20.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "5.9.2",
+    "wrangler": "4.131.2"
+  }
+}

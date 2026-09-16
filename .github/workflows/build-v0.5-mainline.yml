@@ -1,0 +1,52 @@
+name: Build 02 - Formal PicMCP Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - build/v0.5-mainline
+    paths:
+      - 'runtime/worker/**'
+      - 'docs/BUILD_02.md'
+      - '.github/workflows/build-v0.5-mainline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout PicMCP
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify frozen prior trials untouched
+        run: |
+          git diff --exit-code cad06c92d670e1669734991a11833fb06b26b034 HEAD -- \
+            trials/upo-01d trials/upo-02 trials/upo-03 trials/upo-04 trials/upo-06
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install pinned runtime dependencies
+        working-directory: runtime/worker
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck formal runtime
+        working-directory: runtime/worker
+        run: npm run typecheck
+
+      - name: Build Cloudflare bundle without deployment
+        working-directory: runtime/worker
+        run: npm run build:dry
+
+      - name: Assert Build 02 remains non-deploying
+        run: |
+          test -f runtime/worker/dist/index.js || test -d runtime/worker/dist
+          echo 'BUILD_02_DRY_BUNDLE_PASS'
+          echo 'DEPLOYMENT_NOT_PERFORMED'
