@@ -1,0 +1,147 @@
+name: Trial 06 - OAuth Endpoint Observability
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - '.github/workflows/trial-06-oauth-endpoint-observability.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-oauth-endpoints:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Query safe Worker invocation metadata
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_SERVICE: pic-mcp-auth-trial06
+        run: |
+          set -euo pipefail
+          KEYS_API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/observability/telemetry/keys"
+          QUERY_API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/observability/telemetry/query"
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          # Bounded historical window covering the original ChatGPT authorization,
+          # v8 deployment, and the follow-up diagnostics. We query invocation metadata only.
+          start_ms = 1789540200000  # 2026-09-16T06:30:00Z
+          end_ms = 1789556400000    # 2026-09-16T11:00:00Z
+          Path('/tmp/keys-request.json').write_text(json.dumps({
+              'datasets': [], 'from': start_ms, 'to': end_ms, 'limit': 1000,
+          }))
+          PY
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data-binary '@/tmp/keys-request.json' \
+            "${KEYS_API}" > /tmp/keys-response.json
+
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          data = json.loads(Path('/tmp/keys-response.json').read_text())
+          assert data.get('success') is True, data.get('errors')
+          keys = {item.get('key') for item in data.get('result', []) if isinstance(item, dict)}
+          print('OBS_MESSAGE_KEY_PRESENT', '$metadata.message' in keys)
+          print('OBS_SERVICE_KEY_PRESENT', '$metadata.service' in keys)
+          print('OBS_STATUS_KEY_PRESENT', '$metadata.statusCode' in keys)
+          assert '$metadata.message' in keys, 'Invocation message field unavailable'
+          assert '$metadata.service' in keys, 'Service field unavailable'
+
+          start_ms = 1789540200000
+          end_ms = 1789556400000
+          service = os.environ['WORKER_SERVICE']
+          targets = {
+              'health': '/health',
+              'authorize': '/authorize',
+              'register': '/oauth/register',
+              'token': '/oauth/token',
+          }
+          for label, path in targets.items():
+              payload = {
+                  'queryId': f'picmcp-oauth-message-{label}',
+                  'timeframe': {'from': start_ms, 'to': end_ms},
+                  'dry': True,
+                  'limit': 200,
+                  'view': 'events',
+                  'parameters': {
+                      'datasets': [],
+                      'filterCombination': 'and',
+                      'filters': [
+                          {
+                              'key': '$metadata.service',
+                              'operation': 'eq',
+                              'type': 'string',
+                              'value': service,
+                          },
+                          {
+                              'key': '$metadata.message',
+                              'operation': 'includes',
+                              'type': 'string',
+                              'value': path,
+                          },
+                      ],
+                  },
+              }
+              Path(f'/tmp/query-{label}.json').write_text(json.dumps(payload))
+          PY
+
+          for label in health authorize register token; do
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer ${CF_API_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              --data-binary "@/tmp/query-${label}.json" \
+              "${QUERY_API}" > "/tmp/result-${label}.json"
+          done
+
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          targets = ['health', 'authorize', 'register', 'token']
+          counts = {}
+          for label in targets:
+              data = json.loads(Path(f'/tmp/result-{label}.json').read_text())
+              assert data.get('success') is True, (label, data.get('errors'))
+              event_block = (data.get('result') or {}).get('events') or {}
+              events = event_block.get('events') or []
+              safe = []
+              for event in events:
+                  if not isinstance(event, dict):
+                      continue
+                  metadata = event.get('$metadata') or {}
+                  workers = event.get('$workers') or {}
+                  timestamp = event.get('timestamp')
+                  if isinstance(timestamp, (int, float)):
+                      timestamp = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+                  else:
+                      timestamp = None
+                  safe.append({
+                      'timestamp': timestamp,
+                      'status': metadata.get('statusCode') if isinstance(metadata, dict) else None,
+                      'outcome': workers.get('outcome') if isinstance(workers, dict) else None,
+                  })
+              counts[label] = len(safe)
+              print(f'OBS_{label.upper()}_COUNT {len(safe)}')
+              print(f'OBS_{label.upper()}_SAFE_SUMMARY {safe}')
+
+          positive = counts.get('health', 0) > 0
+          print(f'OBS_POSITIVE_CONTROL {"PASS" if positive else "FAIL"}')
+          if positive:
+              print(f'OAUTH_AUTHORIZE_ENDPOINT_OBSERVED {"YES" if counts.get("authorize", 0) > 0 else "NO"}')
+              print(f'OAUTH_REGISTER_ENDPOINT_OBSERVED {"YES" if counts.get("register", 0) > 0 else "NO"}')
+              print(f'OAUTH_TOKEN_ENDPOINT_OBSERVED {"YES" if counts.get("token", 0) > 0 else "NO"}')
+          PY
