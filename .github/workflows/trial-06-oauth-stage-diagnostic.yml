@@ -124,7 +124,6 @@ jobs:
         env:
           CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          WORKER_SERVICE: pic-mcp-auth-trial06
           WORKER_HOST: pic-mcp-auth-trial06.3254849126a.workers.dev
         run: |
           set -euo pipefail
@@ -139,7 +138,6 @@ jobs:
           start_ms = 1789540200000  # 2026-09-16T06:30:00Z
           end_ms = 1789552800000    # 2026-09-16T10:00:00Z
           host = os.environ['WORKER_HOST']
-          service = os.environ['WORKER_SERVICE']
           targets = {
               'health': '/health',
               'authorize': '/authorize',
@@ -155,13 +153,6 @@ jobs:
                   'view': 'events',
                   'parameters': {
                       'datasets': [],
-                      'filterCombination': 'and',
-                      'filters': [{
-                          'key': '$metadata.service',
-                          'operation': 'eq',
-                          'type': 'string',
-                          'value': service,
-                      }],
                       'needle': {
                           'value': f'{host}{path}',
                           'isRegex': False,
