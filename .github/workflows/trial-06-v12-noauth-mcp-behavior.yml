@@ -73,6 +73,10 @@ jobs:
           names = [tool.get('name') for tool in tools]
           assert names == ['get_my_favorites'], names
           tool = tools[0]
+          annotations = tool.get('annotations') or {}
+          assert annotations.get('readOnlyHint') is True, annotations
+          assert annotations.get('destructiveHint') is False, annotations
+          assert annotations.get('openWorldHint') is False, annotations
           schema = tool.get('inputSchema') or {}
           visibility = ((schema.get('properties') or {}).get('visibility') or {})
           assert visibility.get('const') == 'public' or visibility.get('enum') == ['public'], visibility
@@ -102,6 +106,7 @@ jobs:
 
           print('MCP_INITIALIZE_PASS server=pic-mcp version=0.12.0-trial06')
           print('MCP_TOOLS_LIST_PASS tools=get_my_favorites')
+          print('MCP_TOOL_ANNOTATIONS_PASS readOnly=true destructive=false openWorld=false')
           print('MCP_GET_MY_FAVORITES_PASS public_count=64 returned=64 complete=true')
           print('MCP_PUBLIC_ONLY_EXPOSURE_PASS items=64')
           PY
