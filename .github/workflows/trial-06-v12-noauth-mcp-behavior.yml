@@ -1,0 +1,107 @@
+name: Trial 06 - v12 No-Auth MCP Behavior
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - '.github/workflows/trial-06-v12-noauth-mcp-behavior.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-v12-noauth-mcp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Verify tools/list and get_my_favorites
+        env:
+          MCP_URL: https://pic-mcp-auth-trial06.3254849126a.workers.dev/mcp
+        run: |
+          set -euo pipefail
+
+          call_mcp() {
+            local body="$1"
+            local output="$2"
+            curl --fail --silent --show-error \
+              -X POST \
+              -H 'content-type: application/json' \
+              -H 'accept: application/json, text/event-stream' \
+              -H 'MCP-Protocol-Version: 2025-06-18' \
+              --data-binary "$body" \
+              "$MCP_URL" > "$output"
+          }
+
+          call_mcp \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"picmcp-v12-behavior-ci","version":"1.0.0"}}}' \
+            /tmp/init.sse
+
+          call_mcp \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            /tmp/tools-list.sse
+
+          call_mcp \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_my_favorites","arguments":{"source":"pixiv","visibility":"public","limit":100,"offset":0}}}' \
+            /tmp/tools-call.sse
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          def parse_sse(path):
+              text = Path(path).read_text()
+              payloads = []
+              for line in text.splitlines():
+                  if line.startswith('data:'):
+                      payloads.append(json.loads(line[5:].strip()))
+              assert payloads, f'No SSE data in {path}'
+              return payloads[-1]
+
+          init = parse_sse('/tmp/init.sse')
+          assert 'error' not in init, init
+          init_result = init.get('result') or {}
+          assert init_result.get('protocolVersion') == '2025-06-18', init_result
+          server = init_result.get('serverInfo') or {}
+          assert server.get('name') == 'pic-mcp', server
+          assert server.get('version') == '0.12.0-trial06', server
+
+          listed = parse_sse('/tmp/tools-list.sse')
+          assert 'error' not in listed, listed
+          tools = (listed.get('result') or {}).get('tools') or []
+          names = [tool.get('name') for tool in tools]
+          assert names == ['get_my_favorites'], names
+          tool = tools[0]
+          schema = tool.get('inputSchema') or {}
+          visibility = ((schema.get('properties') or {}).get('visibility') or {})
+          assert visibility.get('const') == 'public' or visibility.get('enum') == ['public'], visibility
+
+          called = parse_sse('/tmp/tools-call.sse')
+          assert 'error' not in called, called
+          result = called.get('result') or {}
+          assert result.get('isError') is not True, result
+          content = result.get('content') or []
+          assert content and content[0].get('type') == 'text', content
+          payload = json.loads(content[0].get('text') or '{}')
+
+          assert payload.get('status') == 'PASS', payload.get('status')
+          assert payload.get('source') == 'pixiv', payload.get('source')
+          assert payload.get('visibility') == 'public', payload.get('visibility')
+          snapshot = payload.get('snapshot') or {}
+          page = payload.get('page') or {}
+          items = payload.get('items') or []
+
+          assert snapshot.get('complete') is True, snapshot
+          assert int(snapshot.get('public_count', -1)) == 64, snapshot
+          assert int(page.get('filtered_total', -1)) == 64, page
+          assert int(page.get('returned', -1)) == 64, page
+          assert page.get('next_offset') is None, page
+          assert len(items) == 64, len(items)
+          assert all(item.get('visibility') == 'public' for item in items), 'non-public item exposed'
+
+          print('MCP_INITIALIZE_PASS server=pic-mcp version=0.12.0-trial06')
+          print('MCP_TOOLS_LIST_PASS tools=get_my_favorites')
+          print('MCP_GET_MY_FAVORITES_PASS public_count=64 returned=64 complete=true')
+          print('MCP_PUBLIC_ONLY_EXPOSURE_PASS items=64')
+          PY
