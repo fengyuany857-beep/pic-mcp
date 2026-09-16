@@ -1,0 +1,144 @@
+name: Trial 06 - OAuth Authorize Shape
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - '.github/workflows/trial-06-oauth-authorize-shape.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-authorize-shape:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Parse safe authorize request shape from Worker invocation metadata
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_SERVICE: pic-mcp-auth-trial06
+        run: |
+          set -euo pipefail
+          QUERY_API="https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/observability/telemetry/query"
+
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          payload = {
+              'queryId': 'picmcp-oauth-authorize-shape',
+              'timeframe': {
+                  'from': 1789540200000,  # 2026-09-16T06:30:00Z
+                  'to': 1789556400000,    # 2026-09-16T11:00:00Z
+              },
+              'dry': True,
+              'limit': 200,
+              'view': 'events',
+              'parameters': {
+                  'datasets': [],
+                  'filterCombination': 'and',
+                  'filters': [
+                      {
+                          'key': '$metadata.service',
+                          'operation': 'eq',
+                          'type': 'string',
+                          'value': os.environ['WORKER_SERVICE'],
+                      },
+                      {
+                          'key': '$metadata.message',
+                          'operation': 'includes',
+                          'type': 'string',
+                          'value': '/authorize',
+                      },
+                  ],
+              },
+          }
+          Path('/tmp/query.json').write_text(json.dumps(payload))
+          PY
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data-binary '@/tmp/query.json' \
+            "${QUERY_API}" > /tmp/result.json
+
+          python - <<'PY'
+          import json, re
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import parse_qs, urlparse
+
+          data = json.loads(Path('/tmp/result.json').read_text())
+          assert data.get('success') is True, data.get('errors')
+          events = (((data.get('result') or {}).get('events') or {}).get('events') or [])
+          safe = []
+
+          for event in events:
+              if not isinstance(event, dict):
+                  continue
+              metadata = event.get('$metadata') or {}
+              message = metadata.get('message') if isinstance(metadata, dict) else None
+              if not isinstance(message, str):
+                  continue
+
+              match = re.search(r'\b(GET|POST)\s+(https?://\S+)', message)
+              if not match:
+                  safe.append({'parse': 'unrecognized_message_shape'})
+                  continue
+
+              method, raw_url = match.group(1), match.group(2)
+              parsed = urlparse(raw_url)
+              if parsed.path != '/authorize':
+                  continue
+              query = parse_qs(parsed.query, keep_blank_values=True)
+
+              client_id = (query.get('client_id') or [None])[0]
+              client_kind = 'absent'
+              client_host = None
+              if isinstance(client_id, str) and client_id:
+                  if client_id.startswith('https://'):
+                      client_kind = 'https_url'
+                      client_host = urlparse(client_id).netloc or None
+                  else:
+                      client_kind = 'opaque'
+
+              redirect_uri = (query.get('redirect_uri') or [None])[0]
+              redirect_host = urlparse(redirect_uri).netloc if isinstance(redirect_uri, str) else None
+              scope_raw = (query.get('scope') or [''])[0]
+              scopes = sorted([s for s in scope_raw.split(' ') if s]) if isinstance(scope_raw, str) else []
+              resource = (query.get('resource') or [None])[0]
+              challenge = (query.get('code_challenge') or [None])[0]
+              challenge_method = (query.get('code_challenge_method') or [None])[0]
+              response_type = (query.get('response_type') or [None])[0]
+              state = (query.get('state') or [None])[0]
+
+              timestamp = event.get('timestamp')
+              if isinstance(timestamp, (int, float)):
+                  timestamp = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
+              else:
+                  timestamp = None
+
+              safe.append({
+                  'timestamp': timestamp,
+                  'method': method,
+                  'client_id_kind': client_kind,
+                  'client_id_host': client_host,
+                  'redirect_host': redirect_host,
+                  'response_type': response_type,
+                  'scopes': scopes,
+                  'resource_present': isinstance(resource, str) and bool(resource),
+                  'pkce_challenge_present': isinstance(challenge, str) and bool(challenge),
+                  'pkce_method': challenge_method,
+                  'state_present': isinstance(state, str) and bool(state),
+              })
+
+          print('OAUTH_AUTHORIZE_SAFE_SHAPES', safe)
+          cimd = sum(1 for item in safe if item.get('client_id_kind') == 'https_url')
+          opaque = sum(1 for item in safe if item.get('client_id_kind') == 'opaque')
+          print(f'OAUTH_AUTHORIZE_CLIENT_MODE_COUNTS cimd_url={cimd} opaque={opaque}')
+          PY
