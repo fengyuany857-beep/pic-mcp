@@ -64,6 +64,8 @@ jobs:
           service = os.environ['WORKER_SERVICE']
           targets = {
               'health': '/health',
+              'authmeta': '/.well-known/oauth-authorization-server',
+              'prm': '/.well-known/oauth-protected-resource/mcp',
               'authorize': '/authorize',
               'register': '/oauth/register',
               'token': '/oauth/token',
@@ -97,7 +99,7 @@ jobs:
               Path(f'/tmp/query-{label}.json').write_text(json.dumps(payload))
           PY
 
-          for label in health authorize register token; do
+          for label in health authmeta prm authorize register token; do
             curl --fail --silent --show-error \
               -X POST \
               -H "Authorization: Bearer ${CF_API_TOKEN}" \
@@ -111,14 +113,16 @@ jobs:
           from datetime import datetime, timezone
           from pathlib import Path
 
-          targets = ['health', 'authorize', 'register', 'token']
+          targets = ['health', 'authmeta', 'prm', 'authorize', 'register', 'token']
           counts = {}
+          timestamps = {}
           for label in targets:
               data = json.loads(Path(f'/tmp/result-{label}.json').read_text())
               assert data.get('success') is True, (label, data.get('errors'))
               event_block = (data.get('result') or {}).get('events') or {}
               events = event_block.get('events') or []
               safe = []
+              raw_timestamps = []
               for event in events:
                   if not isinstance(event, dict):
                       continue
@@ -126,6 +130,7 @@ jobs:
                   workers = event.get('$workers') or {}
                   timestamp = event.get('timestamp')
                   if isinstance(timestamp, (int, float)):
+                      raw_timestamps.append(timestamp)
                       timestamp = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
                   else:
                       timestamp = None
@@ -135,6 +140,7 @@ jobs:
                       'outcome': workers.get('outcome') if isinstance(workers, dict) else None,
                   })
               counts[label] = len(safe)
+              timestamps[label] = raw_timestamps
               print(f'OBS_{label.upper()}_COUNT {len(safe)}')
               print(f'OBS_{label.upper()}_SAFE_SUMMARY {safe}')
 
@@ -144,4 +150,16 @@ jobs:
               print(f'OAUTH_AUTHORIZE_ENDPOINT_OBSERVED {"YES" if counts.get("authorize", 0) > 0 else "NO"}')
               print(f'OAUTH_REGISTER_ENDPOINT_OBSERVED {"YES" if counts.get("register", 0) > 0 else "NO"}')
               print(f'OAUTH_TOKEN_ENDPOINT_OBSERVED {"YES" if counts.get("token", 0) > 0 else "NO"}')
+
+              # v8 was deployed at approximately 2026-09-16T07:59:00Z.
+              v8_ms = 1789545540000
+              latest_authorize = max(timestamps.get('authorize') or [0])
+              authmeta_after_v8 = [t for t in timestamps.get('authmeta', []) if t >= v8_ms]
+              prm_after_v8 = [t for t in timestamps.get('prm', []) if t >= v8_ms]
+              authmeta_before_latest_authorize = [t for t in authmeta_after_v8 if t <= latest_authorize]
+              prm_before_latest_authorize = [t for t in prm_after_v8 if t <= latest_authorize]
+              print(f'AUTH_METADATA_REFETCH_AFTER_V8 {"YES" if authmeta_after_v8 else "NO"}')
+              print(f'PRM_REFETCH_AFTER_V8 {"YES" if prm_after_v8 else "NO"}')
+              print(f'AUTH_METADATA_REFETCH_AFTER_V8_BEFORE_LATEST_AUTHORIZE {"YES" if authmeta_before_latest_authorize else "NO"}')
+              print(f'PRM_REFETCH_AFTER_V8_BEFORE_LATEST_AUTHORIZE {"YES" if prm_before_latest_authorize else "NO"}')
           PY
