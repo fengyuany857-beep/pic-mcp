@@ -1,0 +1,47 @@
+name: Trial 06 - Apply Helper MCP Credential Patch
+
+on:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - '.github/workflows/trial-06-apply-helper-mcp-token-patch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-helper-patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout PicMCP
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: trial/upo-06-pixiv-mobile-oauth
+
+      - name: Verify frozen prior trials untouched
+        run: |
+          git diff --exit-code 077f802e395e3d78e38e96292b4203655939bdd4 HEAD -- \
+            trials/upo-01d trials/upo-02 trials/upo-03 trials/upo-04
+
+      - name: Apply exact Helper MCP credential patch
+        run: python trials/upo-06/scripts/patch_helper_mcp_token.py
+
+      - name: Commit only the Helper source change
+        run: |
+          set -euo pipefail
+          git diff --check
+          if git diff --quiet -- trials/upo-06/ios-helper-v2/Sources/PicMCPAuthHelperV2App.swift; then
+            echo 'No Helper patch required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add trials/upo-06/ios-helper-v2/Sources/PicMCPAuthHelperV2App.swift
+          test "$(git diff --cached --name-only | wc -l | tr -d ' ')" = '1'
+          test "$(git diff --cached --name-only)" = 'trials/upo-06/ios-helper-v2/Sources/PicMCPAuthHelperV2App.swift'
+          git commit -m 'feat(trial06): store MCP bearer in iOS Keychain'
+          git push origin HEAD:trial/upo-06-pixiv-mobile-oauth
