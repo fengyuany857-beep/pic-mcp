@@ -1,6 +1,6 @@
 {
   "name": "pic-mcp-auth-trial06",
-  "main": "src/index-v10.ts",
+  "main": "src/index-v11.ts",
   "compatibility_date": "2026-09-15",
   "compatibility_flags": ["global_fetch_strictly_public"],
   "workers_dev": true,
