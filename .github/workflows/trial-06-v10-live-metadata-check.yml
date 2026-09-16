@@ -1,0 +1,44 @@
+name: Trial 06 - v10 Live Metadata Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - trial/upo-06-pixiv-mobile-oauth
+    paths:
+      - '.github/workflows/trial-06-v10-live-metadata-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check-v10-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Verify v10 live OAuth metadata
+        env:
+          BASE: https://pic-mcp-auth-trial06.3254849126a.workers.dev
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "$BASE/health" > /tmp/health.json
+          curl --fail --silent --show-error "$BASE/.well-known/oauth-authorization-server" > /tmp/auth.json
+          curl --fail --silent --show-error "$BASE/.well-known/oauth-protected-resource/mcp" > /tmp/resource.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          health=json.loads(Path('/tmp/health.json').read_text())
+          auth=json.loads(Path('/tmp/auth.json').read_text())
+          resource=json.loads(Path('/tmp/resource.json').read_text())
+          auth_scopes=auth.get('scopes_supported') or []
+          resource_scopes=resource.get('scopes_supported') or []
+          print('V10_HEALTH_MARKER', health.get('oauth_offline_access_advertised'))
+          print('AUTH_SCOPES', auth_scopes)
+          print('RESOURCE_SCOPES', resource_scopes)
+          assert health.get('oauth_offline_access_advertised') is True
+          assert 'favorites:read' in auth_scopes
+          assert 'offline_access' in auth_scopes
+          assert 'favorites:read' in resource_scopes
+          assert 'offline_access' not in resource_scopes
+          print('V10_LIVE_METADATA_PASS')
+          PY
